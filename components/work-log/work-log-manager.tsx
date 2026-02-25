@@ -1667,6 +1667,18 @@ export function WorkLogManager() {
 
                 <div className="mt-4 grid gap-4">
                   <div>
+                    <label className="block text-sm font-semibold text-slate-800 dark:text-slate-200">
+                      기록 내용(달성실적)
+                    </label>
+                    <textarea
+                      rows={7}
+                      value={selectedEntry.result ?? ""}
+                      onChange={(event) => setField("result", event.target.value)}
+                      placeholder="달성실적을 입력하세요."
+                      className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm leading-6 outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-400"
+                    />
+                  </div>
+                  <div>
                     <label className="block text-sm font-semibold text-slate-800 dark:text-slate-200">태그</label>
                     <input
                       value={selectedEntry.tags ?? ""}
@@ -1674,9 +1686,6 @@ export function WorkLogManager() {
                       placeholder="예: 협업, 자동화, 품질개선"
                       className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-400"
                     />
-                    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                      달성실적 문안은 Track 1(업적평가) 단계에서 작성합니다.
-                    </p>
                   </div>
                 </div>
 
