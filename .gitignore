@@ -10,9 +10,13 @@ out/
 .env.local
 .env*.local
 
+# source (internal documents)
+source/
+
 # build
 dist/
 build/
+tsconfig.tsbuildinfo
 
 # debug
 npm-debug.log*
