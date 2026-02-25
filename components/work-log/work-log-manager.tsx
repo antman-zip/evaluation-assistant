@@ -1485,6 +1485,44 @@ export function WorkLogManager() {
     }
   };
 
+  const appendSingleCardToTrack1 = (candidateId: string, cardId: string) => {
+    const candidate = candidateMap.get(candidateId);
+    if (!candidate) return;
+    const card = (candidateSubTasks[candidateId] ?? []).find((c) => c.id === cardId);
+    if (!card) return;
+
+    try {
+      const raw = window.localStorage.getItem(TRACK1_STORAGE_KEY);
+      const parsed = raw ? safeTrack1State(JSON.parse(raw)) : null;
+      const currentItems = parsed?.items ?? [];
+      const newItem: Track1WizardItem = {
+        id: createTrack1ItemId(),
+        goalCategory: candidate.goalCategory,
+        roleAndResponsibilities: candidate.roleAndResponsibilities,
+        goalTaskWeight: candidate.goalTaskWeight,
+        kpiName: card.kpiName || candidate.kpiName,
+        kpiTask: card.kpiTask || candidate.kpiTask,
+        achievementPlan: card.achievementPlan || candidate.achievementPlan,
+        kpiFormula: card.kpiFormula || candidate.kpiFormula,
+        subTaskWeight: card.subTaskWeight,
+        grade: candidate.grade,
+        achievementResult: "",
+        score: candidate.score,
+      };
+      const nextItems = [...currentItems, newItem];
+      const nextState: Track1WizardState = {
+        items: nextItems,
+        selectedItemId: newItem.id,
+      };
+      window.localStorage.setItem(TRACK1_STORAGE_KEY, JSON.stringify(nextState));
+      setCandidateApplyMessage(`'${card.kpiName || "카드"}'를 Track 1에 추가했습니다.`);
+      window.setTimeout(() => setCandidateApplyMessage(""), 1800);
+    } catch (error) {
+      console.error("Failed to append single card to Track 1", error);
+      setCandidateApplyMessage("Track 1 추가 중 오류가 발생했습니다.");
+    }
+  };
+
   const refreshTrack1Preview = () => {
     setCandidateOverrides({});
     setCandidateSubTasks({});
@@ -2325,6 +2363,15 @@ export function WorkLogManager() {
                                   }
                                   className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
                                 />
+                              </div>
+                              <div className="mt-3 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => appendSingleCardToTrack1(selectedCandidate.id, card.id)}
+                                  className="rounded-md border border-indigo-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-700 dark:bg-slate-700 dark:text-indigo-300 dark:hover:bg-slate-600"
+                                >
+                                  이 카드만 Track 1에 추가
+                                </button>
                               </div>
                             </div>
                           )}
