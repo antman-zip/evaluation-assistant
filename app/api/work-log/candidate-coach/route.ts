@@ -27,6 +27,7 @@ type CandidateCoachRequestBody = {
   candidate?: CandidatePayload;
   entries?: WorkLogEntry[];
   messages?: ChatMessagePayload[];
+  currentCardCount?: number;
   geminiApiKey?: string;
   geminiModel?: string;
 };
@@ -38,10 +39,19 @@ type CandidateProgressPayload = {
   readyToApply: boolean;
 };
 
+type SuggestedCard = {
+  kpiName: string;
+  kpiTask: string;
+  achievementPlan: string;
+  kpiFormula: string;
+  subTaskWeight: number | "";
+};
+
 type CandidateCoachResult = {
   reply: string;
   progress: CandidateProgressPayload;
   suggestedUpdates?: Partial<Track1Form>;
+  suggestedCards?: SuggestedCard[];
 };
 
 const PERFORMANCE_GRADES = new Set(["탁월", "우수", "달성", "노력", "미흡"]);
@@ -100,6 +110,25 @@ function stripDateLikeText(value: string) {
     .replace(/\s{2,}/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .trim();
+}
+
+function sanitizeSuggestedCards(value: unknown): SuggestedCard[] | undefined {
+  if (!Array.isArray(value) || !value.length) return undefined;
+  const cards: SuggestedCard[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const kpiName = typeof item.kpiName === "string" ? item.kpiName.trim() : "";
+    const kpiTask = typeof item.kpiTask === "string" ? item.kpiTask.trim() : "";
+    const achievementPlan = typeof item.achievementPlan === "string" ? stripDateLikeText(item.achievementPlan) : "";
+    const kpiFormula = typeof item.kpiFormula === "string" ? item.kpiFormula.trim() : "";
+    const subTaskWeight =
+      typeof item.subTaskWeight === "number" && Number.isFinite(item.subTaskWeight)
+        ? Math.max(0, Math.min(100, Math.round(item.subTaskWeight)))
+        : "";
+    if (!kpiName) continue;
+    cards.push({ kpiName, kpiTask, achievementPlan, kpiFormula, subTaskWeight });
+  }
+  return cards.length ? cards : undefined;
 }
 
 function sanitizeProgress(value: unknown): CandidateProgressPayload {
@@ -167,11 +196,13 @@ function parseCoachResult(raw: string): CandidateCoachResult {
       const reply = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
       const progress = sanitizeProgress(parsed.progress);
       const suggestedUpdates = sanitizeSuggestedUpdates(parsed.suggestedUpdates);
+      const suggestedCards = sanitizeSuggestedCards(parsed.suggestedCards);
       if (reply) {
         return {
           reply,
           progress,
-          suggestedUpdates
+          suggestedUpdates,
+          suggestedCards
         };
       }
     } catch {
@@ -248,7 +279,8 @@ function buildCoachPrompt(
   userMessage: string,
   candidate: CandidatePayload,
   entries: WorkLogEntry[],
-  messages: ChatMessagePayload[]
+  messages: ChatMessagePayload[],
+  currentCardCount: number
 ) {
   const conversation = messages
     .slice(-10)
@@ -266,6 +298,7 @@ function buildCoachPrompt(
     "5) 달성계획은 반드시 3~4개의 마일스톤 번호형 목록으로 작성 (1., 2., 3.)",
     "6) KPI산식은 반드시 탁월/우수/달성/노력/미흡 5단계 기준값이 모두 포함되어야 함",
     "7) 달성계획에는 날짜/기간 표기(YYYY-MM-DD, n월 n일, n주, n일)를 넣지 말 것",
+    "8) 사용자가 하위과업 분리/나누기/구분을 요청하면 반드시 suggestedCards 배열에 2~3개의 완전한 카드를 포함하여 반환해야 한다. reply에 분리안을 텍스트로 설명하는 것만으로는 부족하다. 반드시 suggestedCards JSON 배열에 각 카드의 kpiName, kpiTask, achievementPlan, kpiFormula, subTaskWeight를 모두 채워서 반환한다. subTaskWeight 합계는 100이 되도록 한다. suggestedCards를 반환하면 UI에서 자동으로 카드가 생성된다.",
     "",
     `모드: ${mode}`,
     `사용자 최근 입력: ${userMessage || "-"}`,
@@ -282,6 +315,7 @@ function buildCoachPrompt(
     `- 등급/점수: ${candidate.grade} ${candidate.score}점`,
     `- 달성실적: ${candidate.achievementResult || "-"}`,
     `- 소스: ${candidate.sourceEntryCount || 0}건 / ${candidate.sourcePeriod || "-"} / ${candidate.sourceFolderLabel || "-"}`,
+    `- 현재 하위과업 카드 수: ${currentCardCount}개`,
     "",
     "[관련 기록]",
     summarizeEntries(entries),
@@ -307,13 +341,23 @@ function buildCoachPrompt(
     '    "achievementPlan": "string optional",',
     '    "kpiFormula": "string optional",',
     '    "achievementResult": "string optional"',
-    "  }",
+    "  },",
+    '  "suggestedCards": [',
+    "    {",
+    '      "kpiName": "string",',
+    '      "kpiTask": "string",',
+    '      "achievementPlan": "string",',
+    '      "kpiFormula": "string",',
+    '      "subTaskWeight": 50',
+    "    }",
+    "  ]",
     "}",
     "규칙: JSON 외 텍스트 금지, 코드블록 금지, reply 키 이름 노출 금지.",
     "추가 규칙: suggestedUpdates는 goalCategory, kpiName, roleAndResponsibilities, kpiTask, achievementPlan, kpiFormula, achievementResult를 반드시 채운다.",
     "achievementPlan은 줄바꿈 포함 번호형 3~4개 마일스톤으로 채운다.",
     "achievementPlan에는 날짜/기간 수치를 쓰지 않는다.",
-    "kpiFormula는 산식 본문 + 탁월/우수/달성/노력/미흡 기준값 5줄을 함께 채운다."
+    "kpiFormula는 산식 본문 + 탁월/우수/달성/노력/미흡 기준값 5줄을 함께 채운다.",
+    "중요: 사용자가 '나눠', '분리', '하위과업', '구분' 등 분리를 요청하면 suggestedCards 배열에 2~3개 카드를 반드시 포함한다. reply에서 분리를 설명만 하고 suggestedCards를 비우면 안 된다. 분리 요청이 없으면 suggestedCards는 빈 배열로 둔다."
   ].join("\n");
 }
 
@@ -435,6 +479,7 @@ export async function POST(req: Request) {
   const candidate = body.candidate;
   const entries = body.entries ?? [];
   const messages = body.messages ?? [];
+  const currentCardCount = typeof body.currentCardCount === "number" ? body.currentCardCount : 1;
 
   if (!candidate) {
     return NextResponse.json({ error: "candidate payload가 필요합니다." }, { status: 400 });
@@ -443,7 +488,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "chat 모드에서는 userMessage가 필요합니다." }, { status: 400 });
   }
 
-  const prompt = buildCoachPrompt(mode, userMessage, candidate, entries, messages);
+  const prompt = buildCoachPrompt(mode, userMessage, candidate, entries, messages, currentCardCount);
 
   try {
     const raw = await runCoach(prompt, undefined, clientApiKey, clientModel);

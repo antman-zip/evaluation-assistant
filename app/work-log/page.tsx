@@ -4,7 +4,7 @@ import { WorkLogManager } from "@/components/work-log/work-log-manager";
 export default function WorkLogPage() {
   return (
     <main className="min-h-screen px-6 py-10 md:px-10">
-      <section className="mx-auto max-w-6xl space-y-6">
+      <section className="mx-auto max-w-[1440px] space-y-6">
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600 dark:text-indigo-300">

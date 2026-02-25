@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocalStorageState } from "@/hooks/use-local-storage";
 import { useEvaluationSettings } from "@/components/settings/settings-modal";
 import { PERFORMANCE_GRADE_SCORES, type Track1Form } from "@/types/evaluation";
@@ -65,14 +65,29 @@ type SubTaskCard = {
   locked: boolean;
 };
 
+function autoResizeTextarea(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
+
 function createSubTaskCardId() {
   return `stc-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 }
+
+type SuggestedCardPayload = {
+  kpiName: string;
+  kpiTask: string;
+  achievementPlan: string;
+  kpiFormula: string;
+  subTaskWeight: number | "";
+};
 
 type CandidateCoachResponse = {
   reply: string;
   progress?: Partial<CandidateProgress>;
   suggestedUpdates?: Partial<Track1Form>;
+  suggestedCards?: SuggestedCardPayload[];
 };
 
 function timeValue(iso: string) {
@@ -419,6 +434,7 @@ export function WorkLogManager() {
   const [candidateCoachError, setCandidateCoachError] = useState("");
   const [candidateSubTasks, setCandidateSubTasks] = useState<Record<string, SubTaskCard[]>>({});
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [draggingEntryId, setDraggingEntryId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
   const [dragOverSlotKey, setDragOverSlotKey] = useState<string | null>(null);
@@ -577,15 +593,6 @@ export function WorkLogManager() {
       };
     });
   }, [setState, state.entries, state.folders, state.selection]);
-
-  useEffect(() => {
-    if (!focusFolderId) {
-      setFolderRenameName("");
-      return;
-    }
-    const folder = folderMap.get(focusFolderId);
-    setFolderRenameName(folder?.name ?? "");
-  }, [focusFolderId, folderMap]);
 
   useEffect(() => {
     const prevTopTab = previousTopTabRef.current;
@@ -828,34 +835,25 @@ export function WorkLogManager() {
       return;
     }
     const entries = selectedCandidateEntries;
-    const cards: SubTaskCard[] = entries.length
-      ? entries.map((entry) => {
-          const metric = normalizeEntryText(entry.metrics);
-          return {
-            id: createSubTaskCardId(),
-            kpiName: entry.title || `${entry.type} 업무`,
-            kpiTask: normalizeEntryText(entry.context) || entry.title || "핵심 과업 실행",
-            achievementPlan: normalizeEntryText(entry.result) || "",
-            kpiFormula: metric
-              ? hasGradeThresholdScale(metric)
-                ? metric
-                : `${metric}\n${gradeThresholdScaleBlock()}`
-              : inferKpiFormula([], entry.type),
-            subTaskWeight: "",
-            locked: false,
-          };
-        })
-      : [
-          {
-            id: createSubTaskCardId(),
-            kpiName: "",
-            kpiTask: "",
-            achievementPlan: "",
-            kpiFormula: inferKpiFormula([], "태스크"),
-            subTaskWeight: "",
-            locked: false,
-          },
-        ];
+    // 기록 수와 관계없이 카드 1개만 자동 생성. 기록들은 AI 상담 컨텍스트로 활용.
+    const typeCounts: Record<string, number> = {};
+    for (const e of entries) {
+      typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
+    }
+    const topType = (
+      Object.entries(typeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "태스크"
+    ) as WorkLogType;
+    const cards: SubTaskCard[] = [
+      {
+        id: createSubTaskCardId(),
+        kpiName: "",
+        kpiTask: "",
+        achievementPlan: "",
+        kpiFormula: inferKpiFormula([], topType),
+        subTaskWeight: "",
+        locked: false,
+      },
+    ];
     setCandidateSubTasks((prev) => ({ ...prev, [selectedCandidateId]: cards }));
     setExpandedCardId(cards[0]?.id ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -921,16 +919,27 @@ export function WorkLogManager() {
     });
   };
 
-  const renameFocusedFolder = () => {
-    if (!focusFolderId) return;
+  const commitFolderRename = () => {
+    if (!renamingFolderId) return;
     const nextName = folderRenameName.trim();
-    if (!nextName) return;
+    if (!nextName) {
+      setRenamingFolderId(null);
+      return;
+    }
     setState((prev) => ({
       ...prev,
       folders: prev.folders.map((folder) =>
-        folder.id === focusFolderId ? { ...folder, name: nextName, updatedAt: nowIso() } : folder
+        folder.id === renamingFolderId ? { ...folder, name: nextName, updatedAt: nowIso() } : folder
       )
     }));
+    setRenamingFolderId(null);
+  };
+
+  const startFolderRename = (folderId: string) => {
+    const folder = folderMap.get(folderId);
+    if (!folder) return;
+    setFolderRenameName(folder.name);
+    setRenamingFolderId(folderId);
   };
 
   const toggleFolderCollapsed = (folderId: string) => {
@@ -1336,6 +1345,7 @@ export function WorkLogManager() {
           userMessage: trimmedUserMessage,
           candidate: candidatePayload,
           entries: relatedEntries,
+          currentCardCount: cards.length,
           messages: nextMessagesForRequest.map((message) => ({
             role: message.role,
             content: message.content
@@ -1394,6 +1404,28 @@ export function WorkLogManager() {
             };
           });
         }
+      }
+
+      // AI가 하위과업 분리안을 제안한 경우: 잠기지 않은 카드를 교체
+      if (data.suggestedCards && data.suggestedCards.length > 0) {
+        setCandidateSubTasks((prev) => {
+          const existing = prev[candidateId] ?? [];
+          const lockedCards = existing.filter((c) => c.locked);
+          const newCards: SubTaskCard[] = data.suggestedCards!.map((sc) => ({
+            id: createSubTaskCardId(),
+            kpiName: sc.kpiName || "",
+            kpiTask: sc.kpiTask || "",
+            achievementPlan: sc.achievementPlan || "",
+            kpiFormula: sc.kpiFormula || "",
+            subTaskWeight: sc.subTaskWeight,
+            locked: false,
+          }));
+          return {
+            ...prev,
+            [candidateId]: [...lockedCards, ...newCards],
+          };
+        });
+        setExpandedCardId(null); // 새 카드 목록이니 접힌 상태로 리셋
       }
     } catch (error) {
       setCandidateCoachError(error instanceof Error ? error.message : "상담 중 오류가 발생했습니다.");
@@ -1601,13 +1633,29 @@ export function WorkLogManager() {
           >
             {isCollapsed ? "▶" : "▼"}
           </button>
-          <button
-            type="button"
-            onClick={() => setState((prev) => ({ ...prev, selection: { kind: "folder", id: folder.id } }))}
-            className="flex-1 text-left text-[13px] font-semibold leading-5"
-          >
-            📁 {folder.name}
-          </button>
+          {renamingFolderId === folder.id ? (
+            <input
+              autoFocus
+              value={folderRenameName}
+              onChange={(e) => setFolderRenameName(e.target.value)}
+              onBlur={commitFolderRename}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); commitFolderRename(); }
+                if (e.key === "Escape") { setRenamingFolderId(null); }
+              }}
+              className="flex-1 rounded border border-indigo-400 bg-white px-1.5 py-0.5 text-[13px] font-semibold leading-5 outline-none dark:bg-slate-800 dark:text-slate-100"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setState((prev) => ({ ...prev, selection: { kind: "folder", id: folder.id } }))}
+              onDoubleClick={(e) => { e.stopPropagation(); startFolderRename(folder.id); }}
+              className="flex-1 text-left text-[13px] font-semibold leading-5"
+              title="더블클릭으로 이름 변경"
+            >
+              📁 {folder.name}
+            </button>
+          )}
         </div>
 
         {!isCollapsed && (
@@ -1767,6 +1815,35 @@ export function WorkLogManager() {
         </button>
       </div>
 
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-1.5">
+          <label className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">연도</label>
+          <select
+            value={seasonYear}
+            onChange={(event) => setSeasonYear(Number(event.target.value))}
+            className="w-24 rounded-lg border border-indigo-200 bg-white px-2 py-1.5 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+          >
+            {yearOptions.map((year) => (
+              <option key={year} value={year}>
+                {year}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <label className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">시즌</label>
+          <select
+            value={season}
+            onChange={(event) => setSeason(event.target.value as WorkLogSeason)}
+            className="w-28 rounded-lg border border-indigo-200 bg-white px-2 py-1.5 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+          >
+            <option value="all">연간 전체</option>
+            <option value="h1">상반기</option>
+            <option value="h2">하반기</option>
+          </select>
+        </div>
+      </div>
+
       {topTab === "work-log" ? (
       <div className="mt-6 grid gap-5 lg:grid-cols-[340px_1fr]">
         <aside className="rounded-2xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-700 dark:bg-slate-900/60">
@@ -1818,22 +1895,7 @@ export function WorkLogManager() {
                 폴더 삭제
               </button>
             </div>
-            <div className="grid grid-cols-[1fr_auto] gap-2">
-              <input
-                value={folderRenameName}
-                onChange={(event) => setFolderRenameName(event.target.value)}
-                placeholder="선택 폴더명 변경"
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-400"
-              />
-              <button
-                type="button"
-                onClick={renameFocusedFolder}
-                disabled={!focusFolderId || !folderRenameName.trim()}
-                className="rounded-lg border border-indigo-300 bg-white px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-indigo-700 dark:bg-slate-800 dark:text-indigo-300 dark:hover:bg-slate-700"
-              >
-                이름 저장
-              </button>
-            </div>
+            <p className="text-[11px] text-slate-400 dark:text-slate-500">폴더명 더블클릭으로 이름 변경</p>
           </div>
 
           <div className="mt-2.5 max-h-[560px] space-y-0.5 overflow-y-auto pr-1">
@@ -1967,39 +2029,7 @@ export function WorkLogManager() {
           </div>
 
           <div className="rounded-2xl border border-indigo-200 bg-indigo-50/40 p-4 dark:border-indigo-900 dark:bg-indigo-950/25">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
-                    시즌 연도
-                  </label>
-                  <select
-                    value={seasonYear}
-                    onChange={(event) => setSeasonYear(Number(event.target.value))}
-                    className="mt-1 w-32 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    {yearOptions.map((year) => (
-                      <option key={year} value={year}>
-                        {year}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
-                    시즌
-                  </label>
-                  <select
-                    value={season}
-                    onChange={(event) => setSeason(event.target.value as WorkLogSeason)}
-                    className="mt-1 w-36 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                  >
-                    <option value="all">연간 전체</option>
-                    <option value="h1">상반기</option>
-                    <option value="h2">하반기</option>
-                  </select>
-                </div>
-              </div>
+            <div className="flex flex-wrap items-center justify-end gap-3">
               <button
                 type="button"
                 onClick={organizeFolderSeason}
@@ -2045,39 +2075,7 @@ export function WorkLogManager() {
       </div>
       ) : topTab === "track1-preview" ? (
         <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-5 dark:border-indigo-900 dark:bg-indigo-950/25">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
-                  시즌 연도
-                </label>
-                <select
-                  value={seasonYear}
-                  onChange={(event) => setSeasonYear(Number(event.target.value))}
-                  className="mt-1 w-32 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                >
-                  {yearOptions.map((year) => (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
-                  시즌
-                </label>
-                <select
-                  value={season}
-                  onChange={(event) => setSeason(event.target.value as WorkLogSeason)}
-                  className="mt-1 w-36 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                >
-                  <option value="all">연간 전체</option>
-                  <option value="h1">상반기</option>
-                  <option value="h2">하반기</option>
-                </select>
-              </div>
-            </div>
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <button
               type="button"
               onClick={() => appendCandidatesToTrack1(resolvedTrack1Candidates.map((candidate) => candidate.id))}
@@ -2125,7 +2123,7 @@ export function WorkLogManager() {
             </p>
           )}
 
-          <div className="mt-4 grid gap-4 xl:grid-cols-[300px_1fr_280px]">
+          <div className="mt-4 grid gap-4 xl:grid-cols-[280px_1fr_360px]">
             <aside className="max-h-[620px] space-y-2 overflow-y-auto pr-1">
               {resolvedTrack1Candidates.length ? (
                 resolvedTrack1Candidates.map((candidate) => {
@@ -2331,37 +2329,43 @@ export function WorkLogManager() {
                               <div className="mt-2">
                                 <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">KPI과제</label>
                                 <textarea
-                                  rows={2}
+                                  ref={(el) => autoResizeTextarea(el)}
+                                  rows={1}
                                   value={card.kpiTask}
                                   disabled={isLocked}
-                                  onChange={(e) =>
-                                    setSubTaskCardField(selectedCandidate.id, card.id, "kpiTask", e.target.value)
-                                  }
-                                  className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                  onChange={(e) => {
+                                    setSubTaskCardField(selectedCandidate.id, card.id, "kpiTask", e.target.value);
+                                    autoResizeTextarea(e.target);
+                                  }}
+                                  className="mt-0.5 w-full resize-none overflow-hidden rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
                                 />
                               </div>
                               <div className="mt-2">
                                 <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">달성계획</label>
                                 <textarea
-                                  rows={2}
+                                  ref={(el) => autoResizeTextarea(el)}
+                                  rows={1}
                                   value={card.achievementPlan}
                                   disabled={isLocked}
-                                  onChange={(e) =>
-                                    setSubTaskCardField(selectedCandidate.id, card.id, "achievementPlan", e.target.value)
-                                  }
-                                  className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                  onChange={(e) => {
+                                    setSubTaskCardField(selectedCandidate.id, card.id, "achievementPlan", e.target.value);
+                                    autoResizeTextarea(e.target);
+                                  }}
+                                  className="mt-0.5 w-full resize-none overflow-hidden rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
                                 />
                               </div>
                               <div className="mt-2">
                                 <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">KPI산식(기준)</label>
                                 <textarea
-                                  rows={3}
+                                  ref={(el) => autoResizeTextarea(el)}
+                                  rows={1}
                                   value={card.kpiFormula}
                                   disabled={isLocked}
-                                  onChange={(e) =>
-                                    setSubTaskCardField(selectedCandidate.id, card.id, "kpiFormula", e.target.value)
-                                  }
-                                  className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                  onChange={(e) => {
+                                    setSubTaskCardField(selectedCandidate.id, card.id, "kpiFormula", e.target.value);
+                                    autoResizeTextarea(e.target);
+                                  }}
+                                  className="mt-0.5 w-full resize-none overflow-hidden rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
                                 />
                               </div>
                               <div className="mt-3 flex justify-end">
@@ -2463,7 +2467,7 @@ export function WorkLogManager() {
                         : "상담 시작"}
                   </button>
                 </div>
-                <div className="mt-2 h-56 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900">
+                <div className="mt-2 h-80 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900">
                   {selectedCandidateChat?.messages.length ? (
                     selectedCandidateChat.messages.map((message) => (
                       <div
@@ -2519,39 +2523,7 @@ export function WorkLogManager() {
         </div>
       ) : (
         <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50/40 p-5 dark:border-indigo-900 dark:bg-indigo-950/25">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
-                  시즌 연도
-                </label>
-                <select
-                  value={seasonYear}
-                  onChange={(event) => setSeasonYear(Number(event.target.value))}
-                  className="mt-1 w-32 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                >
-                  {yearOptions.map((year) => (
-                    <option key={year} value={year}>
-                      {year}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
-                  시즌
-                </label>
-                <select
-                  value={season}
-                  onChange={(event) => setSeason(event.target.value as WorkLogSeason)}
-                  className="mt-1 w-36 rounded-lg border border-indigo-200 bg-white px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-                >
-                  <option value="all">연간 전체</option>
-                  <option value="h1">상반기</option>
-                  <option value="h2">하반기</option>
-                </select>
-              </div>
-            </div>
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <button
               type="button"
               onClick={organizeSeason}
