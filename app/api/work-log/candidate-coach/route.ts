@@ -27,6 +27,8 @@ type CandidateCoachRequestBody = {
   candidate?: CandidatePayload;
   entries?: WorkLogEntry[];
   messages?: ChatMessagePayload[];
+  geminiApiKey?: string;
+  geminiModel?: string;
 };
 
 type CandidateProgressPayload = {
@@ -315,11 +317,11 @@ function buildCoachPrompt(
   ].join("\n");
 }
 
-async function coachWithGemini(prompt: string) {
-  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+async function coachWithGemini(prompt: string, overrideApiKey?: string, overrideModel?: string) {
+  const apiKey = overrideApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) return null;
 
-  const configuredModel = (process.env.GEMINI_MODEL ?? "gemini-2.0-flash")
+  const configuredModel = (overrideModel || process.env.GEMINI_MODEL || "gemini-2.0-flash")
     .replace(/^models\//, "")
     .trim();
   const modelCandidates = Array.from(
@@ -390,7 +392,7 @@ async function coachWithOpenAI(prompt: string) {
   return response.output_text?.trim() || null;
 }
 
-async function runCoach(prompt: string, preferred?: ProviderName) {
+async function runCoach(prompt: string, preferred?: ProviderName, overrideApiKey?: string, overrideModel?: string) {
   const order: ProviderName[] = preferred
     ? [preferred, preferred === "gemini" ? "openai" : "gemini"]
     : ["gemini", "openai"];
@@ -398,7 +400,7 @@ async function runCoach(prompt: string, preferred?: ProviderName) {
   let lastError: Error | null = null;
   for (const provider of order) {
     try {
-      const text = provider === "gemini" ? await coachWithGemini(prompt) : await coachWithOpenAI(prompt);
+      const text = provider === "gemini" ? await coachWithGemini(prompt, overrideApiKey, overrideModel) : await coachWithOpenAI(prompt);
       if (!text) continue;
       return text;
     } catch (error) {
@@ -411,18 +413,21 @@ async function runCoach(prompt: string, preferred?: ProviderName) {
 }
 
 export async function POST(req: Request) {
-  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.OPENAI_API_KEY) {
-    return NextResponse.json(
-      { error: "GOOGLE_GENERATIVE_AI_API_KEY 또는 OPENAI_API_KEY가 필요합니다." },
-      { status: 500 }
-    );
-  }
-
   let body: CandidateCoachRequestBody;
   try {
     body = (await req.json()) as CandidateCoachRequestBody;
   } catch {
     return NextResponse.json({ error: "잘못된 JSON 요청입니다." }, { status: 400 });
+  }
+
+  const clientApiKey = body.geminiApiKey?.trim() || undefined;
+  const clientModel = body.geminiModel?.trim() || undefined;
+
+  if (!clientApiKey && !process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.OPENAI_API_KEY) {
+    return NextResponse.json(
+      { error: "GOOGLE_GENERATIVE_AI_API_KEY 또는 OPENAI_API_KEY가 필요합니다. 설정에서 API Key를 입력하거나 .env.local을 확인하세요." },
+      { status: 500 }
+    );
   }
 
   const mode: CoachMode = body.mode === "chat" ? "chat" : "kickoff";
@@ -441,7 +446,7 @@ export async function POST(req: Request) {
   const prompt = buildCoachPrompt(mode, userMessage, candidate, entries, messages);
 
   try {
-    const raw = await runCoach(prompt);
+    const raw = await runCoach(prompt, undefined, clientApiKey, clientModel);
     if (!raw) {
       return NextResponse.json({ error: "AI 응답이 비어 있습니다." }, { status: 502 });
     }
@@ -450,7 +455,7 @@ export async function POST(req: Request) {
 
     if (isLikelyIncompleteReply(result.reply)) {
       const retryPrompt = buildCoachRetryPrompt(mode, userMessage, candidate);
-      const retryRaw = await runCoach(retryPrompt);
+      const retryRaw = await runCoach(retryPrompt, undefined, clientApiKey, clientModel);
       if (retryRaw) {
         const retried = parseCoachResult(retryRaw);
         if (retried.reply && !isLikelyIncompleteReply(retried.reply)) {

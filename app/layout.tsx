@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Noto_Sans_KR } from "next/font/google";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
+import { SettingsModal } from "@/components/settings/settings-modal";
 import "./globals.css";
 
 const notoSansKr = Noto_Sans_KR({
@@ -21,6 +22,7 @@ export default function RootLayout({
     <html lang="ko">
       <body className={`${notoSansKr.variable} font-sans antialiased`}>
         <ThemeToggle />
+        <SettingsModal />
         {children}
       </body>
     </html>

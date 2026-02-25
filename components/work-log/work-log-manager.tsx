@@ -2,6 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useLocalStorageState } from "@/hooks/use-local-storage";
+import { useEvaluationSettings } from "@/components/settings/settings-modal";
 import { PERFORMANCE_GRADE_SCORES, type Track1Form } from "@/types/evaluation";
 import type {
   WorkLogEntry,
@@ -11,6 +12,7 @@ import type {
   WorkLogState,
   WorkLogType
 } from "@/types/work-log";
+import { hasSampleData, loadSampleData, removeSampleData } from "./sample-data";
 
 const WORK_LOG_STORAGE_KEY = "evaluation.work-log.v2";
 const TRACK1_STORAGE_KEY = "evaluation.track1.step1.v3";
@@ -52,6 +54,20 @@ type CandidateChatState = {
   messages: CandidateChatMessage[];
   progress: CandidateProgress;
 };
+
+type SubTaskCard = {
+  id: string;
+  kpiName: string;
+  kpiTask: string;
+  achievementPlan: string;
+  kpiFormula: string;
+  subTaskWeight: number | "";
+  locked: boolean;
+};
+
+function createSubTaskCardId() {
+  return `stc-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+}
 
 type CandidateCoachResponse = {
   reply: string;
@@ -401,6 +417,8 @@ export function WorkLogManager() {
   const [candidateChatInput, setCandidateChatInput] = useState("");
   const [coachLoadingCandidateId, setCoachLoadingCandidateId] = useState<string | null>(null);
   const [candidateCoachError, setCandidateCoachError] = useState("");
+  const [candidateSubTasks, setCandidateSubTasks] = useState<Record<string, SubTaskCard[]>>({});
+  const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const [draggingEntryId, setDraggingEntryId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
   const [dragOverSlotKey, setDragOverSlotKey] = useState<string | null>(null);
@@ -412,6 +430,7 @@ export function WorkLogManager() {
   const [folderCopied, setFolderCopied] = useState(false);
   const previewEntriesSnapshotRef = useRef<WorkLogEntry[] | null>(null);
   const previousTopTabRef = useRef<TopTab>("work-log");
+  const evaluationSettings = useEvaluationSettings();
 
   const folderMap = useMemo(() => new Map(state.folders.map((folder) => [folder.id, folder])), [state.folders]);
 
@@ -712,6 +731,7 @@ export function WorkLogManager() {
 
     const candidates: Track1Candidate[] = [];
     for (const [key, group] of groups.entries()) {
+      if (group.sourceEntryCount === 0) continue;
       const uniqueTags = uniqueList(group.tags);
       const uniqueContexts = uniqueList(group.contexts);
       const uniqueResults = uniqueList(group.results);
@@ -798,6 +818,50 @@ export function WorkLogManager() {
       setSelectedCandidateId(resolvedTrack1Candidates[0].id);
     }
   }, [candidateMap, resolvedTrack1Candidates, selectedCandidateId]);
+
+  useEffect(() => {
+    if (!selectedCandidateId) return;
+    if (candidateSubTasks[selectedCandidateId]) {
+      // already initialized – just set expandedCardId to first card
+      const existing = candidateSubTasks[selectedCandidateId];
+      setExpandedCardId(existing[0]?.id ?? null);
+      return;
+    }
+    const entries = selectedCandidateEntries;
+    const cards: SubTaskCard[] = entries.length
+      ? entries.map((entry) => {
+          const metric = normalizeEntryText(entry.metrics);
+          return {
+            id: createSubTaskCardId(),
+            kpiName: entry.title || `${entry.type} 업무`,
+            kpiTask: normalizeEntryText(entry.context) || entry.title || "핵심 과업 실행",
+            achievementPlan: normalizeEntryText(entry.result) || "",
+            kpiFormula: metric
+              ? hasGradeThresholdScale(metric)
+                ? metric
+                : `${metric}\n${gradeThresholdScaleBlock()}`
+              : inferKpiFormula([], entry.type),
+            subTaskWeight: "",
+            locked: false,
+          };
+        })
+      : [
+          {
+            id: createSubTaskCardId(),
+            kpiName: "",
+            kpiTask: "",
+            achievementPlan: "",
+            kpiFormula: inferKpiFormula([], "태스크"),
+            subTaskWeight: "",
+            locked: false,
+          },
+        ];
+    setCandidateSubTasks((prev) => ({ ...prev, [selectedCandidateId]: cards }));
+    setExpandedCardId(cards[0]?.id ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCandidateId, selectedCandidateEntries]);
+
+  const selectedSubTasks = selectedCandidateId ? candidateSubTasks[selectedCandidateId] ?? [] : [];
 
   const selectedCandidateChat = selectedCandidateId ? candidateChats[selectedCandidateId] : undefined;
   const autoCandidateProgress = useMemo<CandidateProgress>(() => {
@@ -1017,7 +1081,9 @@ export function WorkLogManager() {
         body: JSON.stringify({
           year: seasonYear,
           season,
-          entries: filteredEntries
+          entries: filteredEntries,
+          geminiApiKey: evaluationSettings.geminiApiKey || undefined,
+          geminiModel: evaluationSettings.geminiModel || undefined
         })
       });
 
@@ -1054,7 +1120,9 @@ export function WorkLogManager() {
         body: JSON.stringify({
           year: seasonYear,
           season,
-          entries: filteredFolderEntries
+          entries: filteredFolderEntries,
+          geminiApiKey: evaluationSettings.geminiApiKey || undefined,
+          geminiModel: evaluationSettings.geminiModel || undefined
         })
       });
 
@@ -1101,6 +1169,66 @@ export function WorkLogManager() {
         [key]: value
       }
     }));
+  };
+
+  const setSubTaskCardField = (
+    candidateId: string,
+    cardId: string,
+    key: keyof Omit<SubTaskCard, "id">,
+    value: string | number | ""
+  ) => {
+    setCandidateSubTasks((prev) => {
+      const cards = prev[candidateId];
+      if (!cards) return prev;
+      return {
+        ...prev,
+        [candidateId]: cards.map((c) => (c.id === cardId ? { ...c, [key]: value } : c)),
+      };
+    });
+  };
+
+  const addSubTaskCard = (candidateId: string) => {
+    const newId = createSubTaskCardId();
+    setCandidateSubTasks((prev) => ({
+      ...prev,
+      [candidateId]: [
+        ...(prev[candidateId] ?? []),
+        {
+          id: newId,
+          kpiName: "",
+          kpiTask: "",
+          achievementPlan: "",
+          kpiFormula: inferKpiFormula([], "태스크"),
+          subTaskWeight: "",
+          locked: false,
+        },
+      ],
+    }));
+    setExpandedCardId(newId);
+  };
+
+  const toggleSubTaskLock = (candidateId: string, cardId: string) => {
+    setCandidateSubTasks((prev) => {
+      const cards = prev[candidateId];
+      if (!cards) return prev;
+      return {
+        ...prev,
+        [candidateId]: cards.map((c) =>
+          c.id === cardId ? { ...c, locked: !c.locked } : c
+        ),
+      };
+    });
+  };
+
+  const removeSubTaskCard = (candidateId: string, cardId: string) => {
+    setCandidateSubTasks((prev) => {
+      const cards = prev[candidateId];
+      if (!cards || cards.length <= 1) return prev; // keep at least 1 card
+      return {
+        ...prev,
+        [candidateId]: cards.filter((c) => c.id !== cardId),
+      };
+    });
   };
 
   const applySuggestedUpdates = (candidateId: string, updates: Partial<Track1Form>) => {
@@ -1160,6 +1288,20 @@ export function WorkLogManager() {
     const candidate = candidateMap.get(candidateId);
     if (!candidate) return;
 
+    // Overlay active card data onto candidate for scoped coaching
+    const cards = candidateSubTasks[candidateId] ?? [];
+    const activeCard = expandedCardId ? cards.find((c) => c.id === expandedCardId) : null;
+    const candidatePayload = activeCard
+      ? {
+          ...candidate,
+          kpiName: activeCard.kpiName || candidate.kpiName,
+          kpiTask: activeCard.kpiTask || candidate.kpiTask,
+          achievementPlan: activeCard.achievementPlan || candidate.achievementPlan,
+          kpiFormula: activeCard.kpiFormula || candidate.kpiFormula,
+          subTaskWeight: activeCard.subTaskWeight,
+        }
+      : candidate;
+
     const existingChat = candidateChats[candidateId];
     const existingMessages = existingChat?.messages ?? [];
     const trimmedUserMessage = userMessage.trim();
@@ -1192,12 +1334,14 @@ export function WorkLogManager() {
         body: JSON.stringify({
           mode,
           userMessage: trimmedUserMessage,
-          candidate,
+          candidate: candidatePayload,
           entries: relatedEntries,
           messages: nextMessagesForRequest.map((message) => ({
             role: message.role,
             content: message.content
-          }))
+          })),
+          geminiApiKey: evaluationSettings.geminiApiKey || undefined,
+          geminiModel: evaluationSettings.geminiModel || undefined
         })
       });
 
@@ -1228,6 +1372,28 @@ export function WorkLogManager() {
 
       if (data.suggestedUpdates) {
         applySuggestedUpdates(candidateId, data.suggestedUpdates);
+        // Apply card-level fields to the active unlocked card
+        if (activeCard && !activeCard.locked) {
+          const su = data.suggestedUpdates;
+          setCandidateSubTasks((prev) => {
+            const list = prev[candidateId];
+            if (!list) return prev;
+            return {
+              ...prev,
+              [candidateId]: list.map((c) => {
+                if (c.id !== activeCard.id) return c;
+                const patched = { ...c };
+                if (typeof su.kpiName === "string" && su.kpiName.trim()) patched.kpiName = su.kpiName;
+                if (typeof su.kpiTask === "string" && su.kpiTask.trim()) patched.kpiTask = su.kpiTask;
+                if (typeof su.achievementPlan === "string" && su.achievementPlan.trim())
+                  patched.achievementPlan = su.achievementPlan;
+                if (typeof su.kpiFormula === "string" && su.kpiFormula.trim()) patched.kpiFormula = su.kpiFormula;
+                if (typeof su.subTaskWeight === "number") patched.subTaskWeight = Math.max(0, Math.min(100, su.subTaskWeight));
+                return patched;
+              }),
+            };
+          });
+        }
       }
     } catch (error) {
       setCandidateCoachError(error instanceof Error ? error.message : "상담 중 오류가 발생했습니다.");
@@ -1256,37 +1422,62 @@ export function WorkLogManager() {
 
   const appendCandidatesToTrack1 = (candidateIds: string[]) => {
     if (!candidateIds.length) return;
-    const items = candidateIds
-      .map((candidateId) => candidateMap.get(candidateId))
-      .filter((candidate): candidate is Track1Candidate => !!candidate);
-    if (!items.length) return;
+    const candidates = candidateIds
+      .map((id) => candidateMap.get(id))
+      .filter((c): c is Track1Candidate => !!c);
+    if (!candidates.length) return;
 
     try {
       const raw = window.localStorage.getItem(TRACK1_STORAGE_KEY);
       const parsed = raw ? safeTrack1State(JSON.parse(raw)) : null;
       const currentItems = parsed?.items ?? [];
-      const appended: Track1WizardItem[] = items.map((item) => ({
-        id: createTrack1ItemId(),
-        goalCategory: item.goalCategory,
-        roleAndResponsibilities: item.roleAndResponsibilities,
-        goalTaskWeight: item.goalTaskWeight,
-        kpiName: item.kpiName,
-        kpiTask: item.kpiTask,
-        achievementPlan: item.achievementPlan,
-        kpiFormula: item.kpiFormula,
-        subTaskWeight: item.subTaskWeight,
-        grade: item.grade,
-        achievementResult: "",
-        score: item.score
-      }));
+      const appended: Track1WizardItem[] = [];
+
+      for (const candidate of candidates) {
+        const cards = candidateSubTasks[candidate.id];
+        if (cards && cards.length > 0) {
+          for (const card of cards) {
+            appended.push({
+              id: createTrack1ItemId(),
+              goalCategory: candidate.goalCategory,
+              roleAndResponsibilities: candidate.roleAndResponsibilities,
+              goalTaskWeight: candidate.goalTaskWeight,
+              kpiName: card.kpiName || candidate.kpiName,
+              kpiTask: card.kpiTask || candidate.kpiTask,
+              achievementPlan: card.achievementPlan || candidate.achievementPlan,
+              kpiFormula: card.kpiFormula || candidate.kpiFormula,
+              subTaskWeight: card.subTaskWeight,
+              grade: candidate.grade,
+              achievementResult: "",
+              score: candidate.score,
+            });
+          }
+        } else {
+          appended.push({
+            id: createTrack1ItemId(),
+            goalCategory: candidate.goalCategory,
+            roleAndResponsibilities: candidate.roleAndResponsibilities,
+            goalTaskWeight: candidate.goalTaskWeight,
+            kpiName: candidate.kpiName,
+            kpiTask: candidate.kpiTask,
+            achievementPlan: candidate.achievementPlan,
+            kpiFormula: candidate.kpiFormula,
+            subTaskWeight: candidate.subTaskWeight,
+            grade: candidate.grade,
+            achievementResult: "",
+            score: candidate.score,
+          });
+        }
+      }
+
       const nextItems = [...currentItems, ...appended];
       if (!nextItems.length) return;
       const nextState: Track1WizardState = {
         items: nextItems,
-        selectedItemId: appended[appended.length - 1]?.id ?? parsed?.selectedItemId ?? nextItems[0].id
+        selectedItemId: appended[appended.length - 1]?.id ?? parsed?.selectedItemId ?? nextItems[0].id,
       };
       window.localStorage.setItem(TRACK1_STORAGE_KEY, JSON.stringify(nextState));
-      setCandidateApplyMessage(`${appended.length}개 후보를 Track 1 입력폼에 추가했습니다.`);
+      setCandidateApplyMessage(`${appended.length}개 항목을 Track 1 입력폼에 추가했습니다.`);
       window.setTimeout(() => setCandidateApplyMessage(""), 1800);
     } catch (error) {
       console.error("Failed to append Track 1 candidates", error);
@@ -1296,6 +1487,8 @@ export function WorkLogManager() {
 
   const refreshTrack1Preview = () => {
     setCandidateOverrides({});
+    setCandidateSubTasks({});
+    setExpandedCardId(null);
     setCandidateChats({});
     setCandidateChatInput("");
     setCandidateCoachError("");
@@ -1474,9 +1667,30 @@ export function WorkLogManager() {
           </p>
           <h2 className="mt-1 text-xl font-bold text-brand-ink dark:text-slate-100">상시 기록 정리</h2>
         </div>
-        <span className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-          {isHydrated ? `폴더 ${state.folders.length}개 · 기록 ${state.entries.length}건` : "저장소 동기화 중"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="rounded-lg bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            {isHydrated ? `폴더 ${state.folders.length}개 · 기록 ${state.entries.length}건` : "저장소 동기화 중"}
+          </span>
+          {isHydrated && (
+            hasSampleData(state) ? (
+              <button
+                type="button"
+                onClick={() => setState(removeSampleData)}
+                className="rounded-lg border border-red-200 bg-red-50 px-3 py-1 text-xs font-medium text-red-600 transition hover:bg-red-100 dark:border-red-800 dark:bg-red-950/40 dark:text-red-400 dark:hover:bg-red-900/50"
+              >
+                샘플 데이터 삭제
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setState(loadSampleData)}
+                className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-600 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-400 dark:hover:bg-indigo-900/50"
+              >
+                샘플 데이터 불러오기
+              </button>
+            )
+          )}
+        </div>
       </div>
 
       <div className="mt-4 inline-flex rounded-xl border border-indigo-200 bg-white p-1 dark:border-indigo-900 dark:bg-slate-800">
@@ -1910,6 +2124,7 @@ export function WorkLogManager() {
 
             {selectedCandidate ? (
               <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
+                {/* ── 목표과업 (공유 필드) ── */}
                 <div className="grid gap-3 md:grid-cols-2">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">목표구분</label>
@@ -1922,17 +2137,6 @@ export function WorkLogManager() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">KPI명</label>
-                    <input
-                      value={selectedCandidate.kpiName}
-                      onChange={(event) => setCandidateField(selectedCandidate.id, "kpiName", event.target.value)}
-                      className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <div>
                     <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">R&R</label>
                     <input
                       value={selectedCandidate.roleAndResponsibilities}
@@ -1942,62 +2146,196 @@ export function WorkLogManager() {
                       className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                     />
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">목표과업 비중</label>
-                    <div className="mt-1 flex items-center gap-2">
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={5}
-                        value={selectedCandidate.goalTaskWeight}
-                        onChange={(event) =>
-                          setCandidateField(
-                            selectedCandidate.id,
-                            "goalTaskWeight",
-                            parsePercentInput(event.target.value)
-                          )
-                        }
-                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                      />
-                      <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">%</span>
-                    </div>
+                </div>
+                <div className="mt-3 max-w-[200px]">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">목표과업 비중</label>
+                  <div className="mt-1 flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={selectedCandidate.goalTaskWeight}
+                      onChange={(event) =>
+                        setCandidateField(
+                          selectedCandidate.id,
+                          "goalTaskWeight",
+                          parsePercentInput(event.target.value)
+                        )
+                      }
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    />
+                    <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">%</span>
                   </div>
                 </div>
 
-                <div className="mt-3">
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">KPI과제(하위과업 포함)</label>
-                  <textarea
-                    rows={3}
-                    value={selectedCandidate.kpiTask}
-                    onChange={(event) => setCandidateField(selectedCandidate.id, "kpiTask", event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-6 outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                  />
+                {/* ── 과업KPI 하위과업 카드 ── */}
+                <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-700">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-bold uppercase tracking-wide text-indigo-700 dark:text-indigo-300">
+                      과업KPI (하위과업)
+                      <span className="ml-1.5 font-normal normal-case tracking-normal text-slate-500 dark:text-slate-400">
+                        {selectedSubTasks.length}개
+                      </span>
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => addSubTaskCard(selectedCandidate.id)}
+                      className="rounded-md border border-indigo-300 px-2 py-1 text-[11px] font-semibold text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-300 dark:hover:bg-slate-700"
+                    >
+                      + 하위과업 추가
+                    </button>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {selectedSubTasks.map((card, idx) => {
+                      const isExpanded = expandedCardId === card.id;
+                      const isLocked = card.locked;
+                      return (
+                        <div
+                          key={card.id}
+                          className={`rounded-lg border transition ${
+                            isExpanded
+                              ? "border-indigo-300 bg-indigo-50/40 dark:border-indigo-700 dark:bg-indigo-950/30"
+                              : isLocked
+                                ? "border-slate-200 bg-slate-100/50 dark:border-slate-700 dark:bg-slate-800/50"
+                                : "border-indigo-100 bg-white dark:border-indigo-900/60 dark:bg-slate-800"
+                          }`}
+                        >
+                          {/* ── 헤더 (항상 표시) ── */}
+                          <button
+                            type="button"
+                            onClick={() => setExpandedCardId(isExpanded ? null : card.id)}
+                            className="flex w-full items-center gap-2 px-3 py-2 text-left"
+                          >
+                            <span className="text-[11px] text-indigo-500 dark:text-indigo-400">
+                              {isExpanded ? "\u25BC" : "\u25B6"}
+                            </span>
+                            <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+                              {idx + 1}/{selectedSubTasks.length}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-xs text-slate-800 dark:text-slate-200">
+                              {card.kpiName || "KPI명 미입력"}
+                            </span>
+                            {isLocked && (
+                              <span className="shrink-0 text-[11px] text-amber-600 dark:text-amber-400" title="잠김">
+                                \uD83D\uDD12
+                              </span>
+                            )}
+                          </button>
+
+                          {/* ── 펼친 상태 (편집 영역) ── */}
+                          {isExpanded && (
+                            <div className={`border-t border-indigo-200 px-3 pb-3 pt-2 dark:border-indigo-800 ${isLocked ? "opacity-60" : ""}`}>
+                              <div className="mb-2 flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleSubTaskLock(selectedCandidate.id, card.id);
+                                  }}
+                                  className={`rounded px-1.5 py-0.5 text-[11px] font-medium transition ${
+                                    isLocked
+                                      ? "text-amber-600 hover:bg-amber-50 dark:text-amber-400 dark:hover:bg-amber-950/30"
+                                      : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-700"
+                                  }`}
+                                  title={isLocked ? "잠금 해제" : "잠금 (AI 수정 차단)"}
+                                >
+                                  {isLocked ? "\uD83D\uDD12 잠금 해제" : "\uD83D\uDD13 잠금"}
+                                </button>
+                                {selectedSubTasks.length > 1 && !isLocked && (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeSubTaskCard(selectedCandidate.id, card.id)}
+                                    className="rounded px-1.5 py-0.5 text-[11px] text-red-500 transition hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
+                                  >
+                                    삭제
+                                  </button>
+                                )}
+                              </div>
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">KPI명</label>
+                                  <input
+                                    value={card.kpiName}
+                                    disabled={isLocked}
+                                    onChange={(e) =>
+                                      setSubTaskCardField(selectedCandidate.id, card.id, "kpiName", e.target.value)
+                                    }
+                                    className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">하위과업 비중</label>
+                                  <div className="mt-0.5 flex items-center gap-1.5">
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={100}
+                                      step={5}
+                                      value={card.subTaskWeight}
+                                      disabled={isLocked}
+                                      onChange={(e) =>
+                                        setSubTaskCardField(
+                                          selectedCandidate.id,
+                                          card.id,
+                                          "subTaskWeight",
+                                          parsePercentInput(e.target.value)
+                                        )
+                                      }
+                                      placeholder="0-100"
+                                      className="w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                    />
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">%</span>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="mt-2">
+                                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">KPI과제</label>
+                                <textarea
+                                  rows={2}
+                                  value={card.kpiTask}
+                                  disabled={isLocked}
+                                  onChange={(e) =>
+                                    setSubTaskCardField(selectedCandidate.id, card.id, "kpiTask", e.target.value)
+                                  }
+                                  className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                />
+                              </div>
+                              <div className="mt-2">
+                                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">달성계획</label>
+                                <textarea
+                                  rows={2}
+                                  value={card.achievementPlan}
+                                  disabled={isLocked}
+                                  onChange={(e) =>
+                                    setSubTaskCardField(selectedCandidate.id, card.id, "achievementPlan", e.target.value)
+                                  }
+                                  className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                />
+                              </div>
+                              <div className="mt-2">
+                                <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300">KPI산식(기준)</label>
+                                <textarea
+                                  rows={3}
+                                  value={card.kpiFormula}
+                                  disabled={isLocked}
+                                  onChange={(e) =>
+                                    setSubTaskCardField(selectedCandidate.id, card.id, "kpiFormula", e.target.value)
+                                  }
+                                  className="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm leading-5 outline-none ring-indigo-500 focus:ring disabled:cursor-not-allowed disabled:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
 
-                <div className="mt-3">
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">달성계획</label>
-                  <textarea
-                    rows={5}
-                    value={selectedCandidate.achievementPlan}
-                    onChange={(event) =>
-                      setCandidateField(selectedCandidate.id, "achievementPlan", event.target.value)
-                    }
-                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-6 outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                  />
-                </div>
-
-                <div className="mt-3">
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">KPI산식(기준)</label>
-                  <textarea
-                    rows={7}
-                    value={selectedCandidate.kpiFormula}
-                    onChange={(event) => setCandidateField(selectedCandidate.id, "kpiFormula", event.target.value)}
-                    className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm leading-6 outline-none ring-indigo-500 focus:ring dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                  />
-                </div>
-
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                {/* ── 하단 정보 + 추가 버튼 ── */}
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-3 dark:border-slate-700">
                   <p className="text-xs text-slate-500 dark:text-slate-400">
                     소스 {selectedCandidate.sourceEntryCount}건 · {selectedCandidate.sourcePeriod} ·{" "}
                     {selectedCandidate.sourceFolderLabel}
@@ -2008,15 +2346,7 @@ export function WorkLogManager() {
                       onClick={() => appendCandidatesToTrack1([selectedCandidate.id])}
                       className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-700 dark:bg-slate-700 dark:text-indigo-300 dark:hover:bg-slate-600"
                     >
-                      이 후보 추가
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => appendCandidatesToTrack1([selectedCandidate.id])}
-                      disabled={!mergedCandidateProgress.readyToApply}
-                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      완료 상태로 추가
+                      Track 1에 추가 ({selectedSubTasks.length}개 카드)
                     </button>
                   </div>
                 </div>
@@ -2105,7 +2435,9 @@ export function WorkLogManager() {
                     ))
                   ) : (
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      후보 선택 후 `상담 시작`을 누르면 KPI 목표치/산식 확정 질문이 시작됩니다.
+                      {expandedCardId && selectedSubTasks.find((c) => c.id === expandedCardId)
+                        ? `'${selectedSubTasks.find((c) => c.id === expandedCardId)!.kpiName || "카드"}' 기준으로 상담합니다.`
+                        : "카드를 펼치면 해당 KPI 기준으로 상담합니다."}
                     </p>
                   )}
                 </div>

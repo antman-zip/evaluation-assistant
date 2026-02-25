@@ -21,6 +21,8 @@ type RefineItemPayload = {
 
 type RefineRequestBody = {
   item?: RefineItemPayload;
+  geminiApiKey?: string;
+  geminiModel?: string;
 };
 
 type ProviderName = "gemini" | "openai";
@@ -86,12 +88,12 @@ function buildStrictRetryPrompt(item: RefineItemPayload, draft: string) {
   ].join("\n");
 }
 
-async function refineWithGemini(prompt: string) {
-  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+async function refineWithGemini(prompt: string, overrideApiKey?: string, overrideModel?: string) {
+  const apiKey = overrideApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) return null;
   const geminiApiKey = apiKey;
 
-  const configuredModel = (process.env.GEMINI_MODEL ?? "gemini-2.0-flash")
+  const configuredModel = (overrideModel || process.env.GEMINI_MODEL || "gemini-2.0-flash")
     .replace(/^models\//, "")
     .trim();
   const modelCandidates = Array.from(
@@ -244,7 +246,7 @@ function isLengthOutOfRange(text: string) {
   return len < TARGET_MIN_LENGTH || len > TARGET_MAX_LENGTH;
 }
 
-async function runRefine(prompt: string, preferred?: ProviderName) {
+async function runRefine(prompt: string, preferred?: ProviderName, overrideApiKey?: string, overrideModel?: string) {
   const providerOrder: ProviderName[] = preferred
     ? [preferred, preferred === "gemini" ? "openai" : "gemini"]
     : ["gemini", "openai"];
@@ -254,7 +256,7 @@ async function runRefine(prompt: string, preferred?: ProviderName) {
   for (const provider of providerOrder) {
     try {
       const text =
-        provider === "gemini" ? await refineWithGemini(prompt) : await refineWithOpenAI(prompt);
+        provider === "gemini" ? await refineWithGemini(prompt, overrideApiKey, overrideModel) : await refineWithOpenAI(prompt);
       if (!text) continue;
       return { provider, text: cleanupText(text) };
     } catch (error) {
@@ -267,21 +269,24 @@ async function runRefine(prompt: string, preferred?: ProviderName) {
 }
 
 export async function POST(req: Request) {
-  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.OPENAI_API_KEY) {
-    return NextResponse.json(
-      {
-        error:
-          "GOOGLE_GENERATIVE_AI_API_KEY 또는 OPENAI_API_KEY 중 하나가 필요합니다. .env.local을 확인하세요."
-      },
-      { status: 500 }
-    );
-  }
-
   let body: RefineRequestBody;
   try {
     body = (await req.json()) as RefineRequestBody;
   } catch {
     return NextResponse.json({ error: "잘못된 JSON 요청입니다." }, { status: 400 });
+  }
+
+  const clientApiKey = body.geminiApiKey?.trim() || undefined;
+  const clientModel = body.geminiModel?.trim() || undefined;
+
+  if (!clientApiKey && !process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.OPENAI_API_KEY) {
+    return NextResponse.json(
+      {
+        error:
+          "GOOGLE_GENERATIVE_AI_API_KEY 또는 OPENAI_API_KEY 중 하나가 필요합니다. 설정에서 API Key를 입력하거나 .env.local을 확인하세요."
+      },
+      { status: 500 }
+    );
   }
 
   if (!body.item) {
@@ -291,7 +296,7 @@ export async function POST(req: Request) {
   const prompt = buildRefinePrompt(body.item);
 
   try {
-    const firstResult = await runRefine(prompt);
+    const firstResult = await runRefine(prompt, undefined, clientApiKey, clientModel);
 
     if (!firstResult?.text) {
       return NextResponse.json(
@@ -305,7 +310,7 @@ export async function POST(req: Request) {
     if (isLikelyIncomplete(refinedText) || isMetaLikeOutput(refinedText) || isLengthOutOfRange(refinedText)) {
       const retryPrompt = buildStrictRetryPrompt(body.item, refinedText);
 
-      const secondResult = await runRefine(retryPrompt, firstResult.provider);
+      const secondResult = await runRefine(retryPrompt, firstResult.provider, clientApiKey, clientModel);
       if (secondResult?.text) {
         refinedText = secondResult.text;
       }

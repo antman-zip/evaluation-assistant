@@ -11,6 +11,8 @@ type OrganizeRequestBody = {
   year?: number;
   season?: WorkLogSeason;
   entries?: WorkLogEntry[];
+  geminiApiKey?: string;
+  geminiModel?: string;
 };
 
 function seasonLabel(season: WorkLogSeason | undefined) {
@@ -91,11 +93,11 @@ function buildOrganizePrompt(year: number, season: WorkLogSeason, entries: WorkL
   ].join("\n");
 }
 
-async function organizeWithGemini(prompt: string) {
-  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+async function organizeWithGemini(prompt: string, overrideApiKey?: string, overrideModel?: string) {
+  const apiKey = overrideApiKey || process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) return null;
 
-  const configuredModel = (process.env.GEMINI_MODEL ?? "gemini-1.5-flash")
+  const configuredModel = (overrideModel || process.env.GEMINI_MODEL || "gemini-1.5-flash")
     .replace(/^models\//, "")
     .trim();
   const modelCandidates = Array.from(
@@ -166,7 +168,7 @@ async function organizeWithOpenAI(prompt: string) {
   return response.output_text?.trim() || null;
 }
 
-async function runOrganize(prompt: string, preferred?: ProviderName) {
+async function runOrganize(prompt: string, preferred?: ProviderName, overrideApiKey?: string, overrideModel?: string) {
   const order: ProviderName[] = preferred
     ? [preferred, preferred === "gemini" ? "openai" : "gemini"]
     : ["gemini", "openai"];
@@ -175,7 +177,7 @@ async function runOrganize(prompt: string, preferred?: ProviderName) {
   for (const provider of order) {
     try {
       const text =
-        provider === "gemini" ? await organizeWithGemini(prompt) : await organizeWithOpenAI(prompt);
+        provider === "gemini" ? await organizeWithGemini(prompt, overrideApiKey, overrideModel) : await organizeWithOpenAI(prompt);
       if (!text) continue;
       return text;
     } catch (error) {
@@ -187,18 +189,21 @@ async function runOrganize(prompt: string, preferred?: ProviderName) {
 }
 
 export async function POST(req: Request) {
-  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.OPENAI_API_KEY) {
-    return NextResponse.json(
-      { error: "GOOGLE_GENERATIVE_AI_API_KEY 또는 OPENAI_API_KEY가 필요합니다." },
-      { status: 500 }
-    );
-  }
-
   let body: OrganizeRequestBody;
   try {
     body = (await req.json()) as OrganizeRequestBody;
   } catch {
     return NextResponse.json({ error: "잘못된 JSON 요청입니다." }, { status: 400 });
+  }
+
+  const clientApiKey = body.geminiApiKey?.trim() || undefined;
+  const clientModel = body.geminiModel?.trim() || undefined;
+
+  if (!clientApiKey && !process.env.GOOGLE_GENERATIVE_AI_API_KEY && !process.env.OPENAI_API_KEY) {
+    return NextResponse.json(
+      { error: "GOOGLE_GENERATIVE_AI_API_KEY 또는 OPENAI_API_KEY가 필요합니다. 설정에서 API Key를 입력하거나 .env.local을 확인하세요." },
+      { status: 500 }
+    );
   }
 
   const entries = body.entries ?? [];
@@ -211,7 +216,7 @@ export async function POST(req: Request) {
   const prompt = buildOrganizePrompt(year, season, entries);
 
   try {
-    const draft = await runOrganize(prompt);
+    const draft = await runOrganize(prompt, undefined, clientApiKey, clientModel);
     if (!draft) {
       return NextResponse.json({ error: "AI 응답이 비어 있습니다." }, { status: 502 });
     }

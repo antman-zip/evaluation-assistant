@@ -38,7 +38,7 @@ export function ThemeToggle() {
     <button
       type="button"
       onClick={onToggle}
-      className="fixed right-5 top-5 z-50 inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-slate-700 shadow-md backdrop-blur transition hover:scale-[1.03] hover:bg-white dark:border-slate-600 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:bg-slate-800"
+      className="fixed right-[4.5rem] top-5 z-50 inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-slate-700 shadow-md backdrop-blur transition hover:scale-[1.03] hover:bg-white dark:border-slate-600 dark:bg-slate-800/90 dark:text-slate-100 dark:hover:bg-slate-800"
       aria-label={mode === "light" ? "다크 모드로 전환" : "라이트 모드로 전환"}
       title={mode === "light" ? "다크 모드" : "라이트 모드"}
     >

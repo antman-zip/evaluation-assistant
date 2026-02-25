@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useLocalStorageState } from "@/hooks/use-local-storage";
+import { useEvaluationSettings } from "@/components/settings/settings-modal";
 import {
   PERFORMANCE_GRADE_SCORES,
   TRACK1_INITIAL_VALUE,
@@ -136,6 +137,7 @@ export function Track1InitialForm() {
   const [isRefining, setIsRefining] = useState(false);
   const [refineError, setRefineError] = useState<string>("");
   const [lastRefinedAt, setLastRefinedAt] = useState<string>("");
+  const evaluationSettings = useEvaluationSettings();
 
   const selectedItemIndex = state.items.findIndex((item) => item.id === state.selectedItemId);
   const selectedItem = selectedItemIndex >= 0 ? state.items[selectedItemIndex] : state.items[0];
@@ -237,7 +239,9 @@ export function Track1InitialForm() {
             grade: selectedItem.grade,
             score: selectedItem.score,
             achievementResult: selectedItem.achievementResult
-          }
+          },
+          geminiApiKey: evaluationSettings.geminiApiKey || undefined,
+          geminiModel: evaluationSettings.geminiModel || undefined
         })
       });
 
